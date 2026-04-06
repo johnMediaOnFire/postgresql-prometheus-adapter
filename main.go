@@ -209,6 +209,7 @@ func parseFlags() *config {
 	_, err := a.Parse(os.Args[1:])
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Error parsing commandline arguments")
+		fmt.Printf("%v", err)
 		a.Usage(os.Args[1:])
 		os.Exit(2)
 	}
