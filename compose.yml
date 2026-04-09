@@ -1,0 +1,40 @@
+services:
+  prom-psql-adapter:
+    image: crunchydata/prometheus-postgresql-adapter-latest
+    container_name: prom-psql-adapter
+    platform: "linux/amd64"
+    ports:
+      - target: 9201
+        published: 9201
+        protocol: tcp
+    build:
+      dockerfile: Dockerfile
+      context: .
+    environment:
+      - DB_HOST=postgresdb
+      - DB_NAME=prometheus
+      - DB_USER=localuser
+      - DB_PASS=password
+      - DB_SSLMODE=disable
+
+    command: bash -x /start.sh
+    depends_on:
+      postgresdb:
+        condition: service_healthy
+        restart: true
+
+  postgresdb:
+    image: postgres:16-bookworm
+    container_name: postgresql
+    platform: "linux/amd64"
+    ports:
+      - target: 5432
+        published: 5432
+        protocol: tcp
+    environment:
+      - POSTGRES_USER=localuser
+      - POSTGRES_PASSWORD=password
+      - POSTGRES_DB=prometheus
+      - POSTGRES_HOST=postgresdb
+    healthcheck:
+      test: ["CMD-SHELL", "sh -c 'pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}'"]

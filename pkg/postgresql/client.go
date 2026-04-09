@@ -13,9 +13,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-kit/kit/log"
-	"github.com/go-kit/kit/log/level"
+	"github.com/go-kit/log"
+	"github.com/go-kit/log/level"
 	"github.com/jackc/pgx/v4"
+	"github.com/jackc/pgx/v4/pgxpool"
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/prometheus/prompb"
 )
@@ -29,6 +30,7 @@ type Config struct {
 	PGWriters       int
 	PGParsers       int
 	PartitionScheme string
+	KeepDays int
 }
 
 var promSamples = list.New()
@@ -212,7 +214,7 @@ func Pop() *model.Samples {
 // Client - struct to hold critical values
 type Client struct {
 	logger log.Logger
-	DB     *pgx.Conn
+	DB     *pgxpool.Pool
 	cfg    *Config
 }
 
@@ -222,7 +224,7 @@ func NewClient(logger log.Logger, cfg *Config) *Client {
 		logger = log.NewNopLogger()
 	}
 
-	conn1, err := pgx.Connect(context.Background(), os.Getenv("DATABASE_URL"))
+	conn1, err := pgxpool.Connect(context.Background(), os.Getenv("DATABASE_URL"))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Error: Unable to connect to database using DATABASE_URL=", os.Getenv("DATABASE_URL"))
 		os.Exit(1)
@@ -320,6 +322,86 @@ func (c *PGWriter) setupPgPartitions(partitionScheme string, lastPartitionTS tim
 	return nil
 }
 
+func (c *Client) getPgPartitionNames(daysInPast int) ([]string, error) {
+	oldest := "metric_values_" + time.Now().AddDate(0, 0, -daysInPast).Format("20060102")
+	level.Debug(c.logger).Log("msg", fmt.Sprintf("getPgPartitionNames %s", oldest))
+
+	rows, err := c.DB.Query(context.Background(), `
+SELECT tablename
+FROM pg_catalog.pg_tables
+WHERE tablename like 'metric_values_%'
+AND tablename <= $1
+AND schemaname = 'public'
+ORDER BY tablename ASC
+`, oldest)
+	if err != nil {
+		return nil, err
+	}
+
+	var partitions []string
+	var partition string
+	for rows.Next() {
+		err := rows.Scan(&partition)
+		if err != nil {
+			return nil, err
+		}
+		partitions = append(partitions, partition)
+	}
+
+	return partitions, nil
+}
+
+func (c *Client) dropPgPartition(partitionName string) (err error) {
+	level.Info(c.logger).Log("msg", fmt.Sprintf("Dropping partition %s", partitionName))
+	_, err = c.DB.Exec(context.Background(),
+		fmt.Sprintf("ALTER TABLE metric_values DETACH PARTITION %s", partitionName))
+	if err != nil {
+		return err
+	}
+
+	_, err = c.DB.Exec(context.Background(),
+		fmt.Sprintf("DROP TABLE %s", partitionName))
+
+	return err
+}
+
+
+func (c *Client) CullPgPartitions(once bool, ctx context.Context) {
+	for {
+		if c.cfg.PartitionScheme == "daily" {
+			level.Info(c.logger).Log("msg", "Culling partitions, daily")
+			partitions, err := c.getPgPartitionNames(c.cfg.KeepDays)
+			if err != nil {
+				level.Error(c.logger).Log("msg", fmt.Sprintf("failed to get partition names: %v", err))
+			} else {
+				cullCount := min(2, len(partitions))
+				for _, partition := range partitions[0:cullCount] {
+					err = c.dropPgPartition(partition)
+					if err != nil {
+						level.Error(c.logger).Log("msg", fmt.Sprintf("failed to drop partition name %s: %v", partition, err))
+						break
+					}
+				}
+			}
+
+		} else if c.cfg.PartitionScheme == "hourly" {
+			level.Warn(c.logger).Log("msg", "Culling partitions, hourly, is not yet implemented")
+		}
+
+		if once {
+			return
+		}
+
+		select {
+		case <-time.After(1 * time.Hour):
+			// Cull again
+		case <-ctx.Done():
+			level.Info(c.logger).Log("msg", "CullPgPartitions terminating")
+			return
+		}
+	}
+}
+
 func metricString(m model.Metric) string {
 	metricName, hasName := m[model.MetricNameLabel]
 	numLabels := len(m) - 1
@@ -369,9 +451,7 @@ func createOrderedKeys(m *map[string]string) []string {
 // Close - Close database connections
 func (c *Client) Close() {
 	if c.DB != nil {
-		if err1 := c.DB.Close(context.Background()); err1 != nil {
-			level.Error(c.logger).Log("msg", err1.Error())
-		}
+		c.DB.Close()
 	}
 }
 
@@ -429,15 +509,11 @@ func (c *Client) Read(req *prompb.ReadRequest) (*prompb.ReadResponse, error) {
 
 	for _, q := range req.Queries {
 		command, err := c.buildCommand(q)
-
 		if err != nil {
 			return nil, err
 		}
 
-		level.Debug(c.logger).Log("msg", "Executed query", "query", command)
-
 		rows, err := c.DB.Query(context.Background(), command)
-
 		if err != nil {
 			rows.Close()
 			return nil, err
