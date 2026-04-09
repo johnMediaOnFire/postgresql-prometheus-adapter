@@ -10,10 +10,18 @@ The PostgreSQL Prometheus Adapter accepts Prometheus remote read/write requests,
 
 Additional information regarding the adapter and getting started is provided below and available in this [blog post introducing the PostgreSQL Prometheus Adapter](https://info.crunchydata.com/blog/using-postgres-to-back-prometheus-for-your-postgresql-monitoring-1).
 
+
+2026-04-08: This is my fork of Crunchydata's archived repository:
+* Updated for Go 1.21 (will bump to 1.26 soonish)
+* Added partition culling with tests (requires **Postgresql** - see **compose.yml**)
+
+Any stupidity, mistakes, crappy coding are mine. Thanks to Crunchydata for doing the real work.
+
 ## PostgreSQL Version Support
 
 PostgreSQL Prometheus Adapter supports:
 
+* PostgreSQL 16
 * PostgreSQL 14
 * PostgreSQL 13
 * PostgreSQL 12
@@ -75,6 +83,7 @@ Flags:
       --log.level=info                 Only log messages with the given severity or above. One of: [debug, info, warn, error]
       --log.format=logfmt              Output format of log messages. One of: [logfmt, json]
       --pg-partition="hourly"          daily or hourly partitions, default: hourly
+      --pg-partition-keep-days         The number of days to keep partitions, default: 60
       --pg-commit-secs=15              Write data to database every N seconds
       --pg-commit-rows=20000           Write data to database every N Rows
       --pg-threads=1                   Writer DB threads to run 1-10
@@ -92,7 +101,7 @@ podman run --rm \
   -p 9201:9201 \
   -e DATABASE_URL="user=testuser password=test123 host=192.168.12.36 port=5432 database=testdb" \
   --detach \
-  crunchydata/postgresql-prometheus-adapterl:latest
+  crunchydata/postgresql-prometheus-adapter:latest
   ```
 
 #### Stop container
@@ -112,6 +121,7 @@ web_telemetry_path="/metrics"  Address to listen on for web endpoints.
 log_level=info                 Only log messages with the given severity or above. One of: [debug, info, warn, error]
 log_format=logfmt              Output format of log messages. One of: [logfmt, json]
 pg_partition="hourly"          daily or hourly partitions, default: hourly
+pg_partition_keep_days=60      The number of days to keep partitions, default: 60
 pg_commit_secs=15              Write data to database every N seconds
 pg_commit_rows=20000           Write data to database every N Rows
 pg_threads=1                   Writer DB threads to run 1-10
@@ -132,7 +142,9 @@ remote_read:
 
 ## Maintainers
 
-The PostgreSQL Prometheus Adapter is maintained by the team at [Crunchy Data](https://www.crunchydata.com/).
+The PostgreSQL Prometheus Adapter was built by the team at [Crunchy Data](https://www.crunchydata.com/).
+
+I'm making a mess of it.
 
 ## Contributing to the Project
 

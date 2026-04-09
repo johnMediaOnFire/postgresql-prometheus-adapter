@@ -22,15 +22,17 @@
 package main
 
 import (
+	"context"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"syscall"
 	"time"
 
-	"path/filepath"
 
 	"github.com/crunchydata/postgresql-prometheus-adapter/pkg/postgresql"
 
@@ -39,8 +41,6 @@ import (
 	"github.com/gogo/protobuf/proto"
 	"github.com/golang/snappy"
 
-	//"github.com/jamiealquiza/envy"
-
 	"github.com/prometheus/common/promlog"
 	"github.com/prometheus/common/promlog/flag"
 
@@ -48,10 +48,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/prometheus/prometheus/prompb"
 
-	//"github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/model"
 	"gopkg.in/alecthomas/kingpin.v2"
-	//"flag"
 )
 
 var Version = "development"
@@ -146,11 +144,18 @@ func main() {
 	http.Handle(cfg.telemetryPath, promhttp.Handler())
 	writer, reader := buildClients(logger, cfg)
 
+	level.Info(logger).Log("msg", "Starting Partition Culler")
+	cullCtx := context.Background()
+	cullCancelCtx, cullCancel := context.WithCancel(cullCtx)
+	cullClient := postgresql.NewClient(log.With(logger, "storage", "PostgreSQL"), &cfg.pgPrometheusConfig)
+	go cullClient.CullPgPartitions(false, cullCancelCtx)
+
 	c := make(chan os.Signal, 1)
-	signal.Notify(c, os.Interrupt)
+	signal.Notify(c, os.Interrupt, syscall.SIGTERM, syscall.SIGQUIT)
 	go func() {
 		for sig := range c {
 			fmt.Printf("Signal: %v\n", sig)
+			cullCancel()
 			for t := 0; t < cfg.pgPrometheusConfig.PGWriters; t++ {
 				fmt.Printf("Calling shutdown %d\n", t)
 				worker[t].PGWriterShutdown()
@@ -169,7 +174,7 @@ func main() {
 		defer worker[t].PGWriterShutdown()
 	}
 
-	level.Info(logger).Log("msg", "Starting HTTP Listerner")
+	level.Info(logger).Log("msg", "Starting HTTP Listener")
 
 	http.Handle("/write", timeHandler("write", write(logger, writer)))
 	http.Handle("/read", timeHandler("read", read(logger, reader)))
@@ -179,7 +184,7 @@ func main() {
 
 	err := http.ListenAndServe(cfg.listenAddr, nil)
 
-	level.Info(logger).Log("msg", "Started HTTP Listerner")
+	level.Info(logger).Log("msg", "Started HTTP Listener")
 
 	if err != nil {
 		level.Error(logger).Log("msg", "Listen failure", "err", err)
@@ -201,6 +206,7 @@ func parseFlags() *config {
 	flag.AddFlags(a, &cfg.promlogConfig)
 
 	a.Flag("pg-partition", "daily or hourly partitions, default: hourly").Default("hourly").StringVar(&cfg.pgPrometheusConfig.PartitionScheme)
+	a.Flag("pg-partition-keep-days", "The number of days to keep partitions, default: 60").Default("60").IntVar(&cfg.pgPrometheusConfig.KeepDays)
 	a.Flag("pg-commit-secs", "Write data to database every N seconds").Default("15").IntVar(&cfg.pgPrometheusConfig.CommitSecs)
 	a.Flag("pg-commit-rows", "Write data to database every N Rows").Default("20000").IntVar(&cfg.pgPrometheusConfig.CommitRows)
 	a.Flag("pg-threads", "Writer DB threads to run 1-10").Default("1").IntVar(&cfg.pgPrometheusConfig.PGWriters)
@@ -209,6 +215,7 @@ func parseFlags() *config {
 	_, err := a.Parse(os.Args[1:])
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Error parsing commandline arguments")
+		fmt.Printf("%v", err)
 		a.Usage(os.Args[1:])
 		os.Exit(2)
 	}
@@ -235,7 +242,7 @@ func buildClients(logger log.Logger, cfg *config) (writer, reader) {
 
 func write(logger log.Logger, writer writer) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		compressed, err := ioutil.ReadAll(r.Body)
+		compressed, err := io.ReadAll(r.Body)
 		if err != nil {
 			level.Error(logger).Log("msg", "Read error", "err", err.Error())
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -269,7 +276,7 @@ func write(logger log.Logger, writer writer) http.Handler {
 
 func read(logger log.Logger, reader reader) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		compressed, err := ioutil.ReadAll(r.Body)
+		compressed, err := io.ReadAll(r.Body)
 		if err != nil {
 			level.Error(logger).Log("msg", "Read error", "err", err.Error())
 			http.Error(w, err.Error(), http.StatusInternalServerError)
